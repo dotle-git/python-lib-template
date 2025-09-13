@@ -11,11 +11,13 @@ permissions:
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
-    steps: - uses: actions/checkout@v4
+    steps:
+      - uses: actions/checkout@v4
+      
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.x'
+          python-version: '3.11'
       
       - name: Extract version from pyproject.toml
         id: get-version
@@ -33,6 +35,8 @@ jobs:
           PACKAGE_NAME=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['name'])")
           VERSION="${{ steps.get-version.outputs.VERSION }}"
           
+          echo "Checking if version $VERSION of package $PACKAGE_NAME exists on PyPI..."
+          
           python -c "
           import requests
           import sys
@@ -41,27 +45,43 @@ jobs:
           version = '$VERSION'
           
           try:
-              response = requests.get(f'https://pypi.org/pypi/{package}/{version}/json')
+              response = requests.get(f'https://pypi.org/pypi/{package}/{version}/json', timeout=10)
               if response.status_code == 200:
-                  print(f'Version {version} already exists on PyPI')
+                  print(f'Version {version} already exists on PyPI - skipping publish')
                   sys.exit(0)
+              elif response.status_code == 404:
+                  print(f'Version {version} does not exist on PyPI - will publish')
+                  sys.exit(1)
               else:
-                  print(f'Version {version} does not exist on PyPI, proceeding with publish')
+                  print(f'Unexpected response from PyPI: {response.status_code}')
+                  print(f'Proceeding with publish to be safe')
                   sys.exit(1)
           except Exception as e:
               print(f'Error checking PyPI: {e}')
-              print(f'Assuming version {version} does not exist, proceeding with publish')
+              print(f'Proceeding with publish to be safe')
               sys.exit(1)
-          " || echo "SHOULD_PUBLISH=true" >> $GITHUB_OUTPUT
+          "
+          
+          # If the Python script exits with code 1, we should publish
+          if [ $? -eq 1 ]; then
+              echo "SHOULD_PUBLISH=true" >> $GITHUB_OUTPUT
+              echo "Setting SHOULD_PUBLISH=true"
+          else
+              echo "SHOULD_PUBLISH=false" >> $GITHUB_OUTPUT
+              echo "Setting SHOULD_PUBLISH=false"
+          fi
       
       - name: Build wheel and sdist
         if: steps.check-pypi.outputs.SHOULD_PUBLISH == 'true'
         run: |
           python -m pip install --upgrade pip build
           python -m build
+          echo "Build artifacts:"
+          ls -la dist/
       
       - name: Publish to PyPI via Trusted Publisher
         if: steps.check-pypi.outputs.SHOULD_PUBLISH == 'true'
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           print-hash: true
+          skip-existing: true
